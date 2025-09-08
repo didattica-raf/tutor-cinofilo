@@ -59,18 +59,14 @@ def load_documents_from_folder(folder_path):
 def create_vectorstore(materiale="Tutte le materie"):
     folder = DOCS_ROOT if materiale == "Tutte le materie" else os.path.join(DOCS_ROOT, materiale)
     docs = load_documents_from_folder(folder)
-
     if not docs:
         st.error("⚠️ Nessun documento trovato nella materia selezionata.")
         st.stop()
-
     splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
-
     if not chunks:
         st.error("⚠️ Nessun contenuto testuale utile trovato nei documenti.")
         st.stop()
-
     embeddings = OpenAIEmbeddings()
     return FAISS.from_documents(chunks, embeddings)
 
@@ -105,11 +101,13 @@ if user_code:
     materie = ["Tutte le materie"] + [materia_labels[m] for m in materia_labels]
 
     materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
+    label_to_folder = {v: k for k, v in materia_labels.items()}
+    materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
 
     user_question = st.text_input("✍️ Fai la tua domanda:")
     if user_question:
         with st.spinner("Sto cercando nei materiali..."):
-            vectorstore = create_vectorstore(materia_scelta)
+            vectorstore = create_vectorstore(materia_folder)
             qa = RetrievalQA.from_chain_type(
                 llm=ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0),
                 chain_type="stuff",
