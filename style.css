@@ -1,0 +1,9 @@
+
+.logo-container {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+img {
+    max-height: 100px;
+}
