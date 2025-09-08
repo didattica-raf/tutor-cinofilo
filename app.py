@@ -75,7 +75,7 @@ load_dotenv()
 local_css("style.css")
 
 st.set_page_config(page_title="Chatbot Materie", page_icon="📚")
-st.markdown("<div class='logo-container'><img src='https://postimg.cc/Yh0tJ2TQ'></div>", unsafe_allow_html=True)
+st.markdown("<div class='logo-container'><img src='https://i.postimg.cc/5NqjQ63K/images.jpg'></div>", unsafe_allow_html=True)
 st.title("📚 Chatbot Educativo")
 st.markdown("Interroga i documenti caricati per materia. Max 5 domande al giorno per codice.")
 
