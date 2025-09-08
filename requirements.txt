@@ -1,7 +1,9 @@
 
 streamlit
 python-dotenv
-openai
+openai>=1.1.1
 langchain
-pypdf
 faiss-cpu
+pypdf
+langchain-community
+tiktoken
