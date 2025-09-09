@@ -10,10 +10,11 @@ from dotenv import load_dotenv
 from pypdf import PdfReader  # per leggere PDF da bytes
 from langchain.schema import Document
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chains import RetrievalQA
-from langchain_community.chat_models import ChatOpenAI
+
+# === IMPORT MODERNI PER OPENAI (migrazione consigliata) ===
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 
 # --- CONFIG (immutata dove possibile) ---
 DOCS_ROOT = "docs"  # non più usata per caricare, ma la lascio per compatibilità
@@ -235,7 +236,8 @@ def create_vectorstore_from_ftp(materia="Tutte le materie"):
         st.stop()
     os.environ["OPENAI_API_KEY"] = api_key
 
-    embeddings = OpenAIEmbeddings()
+    # === Embeddings modello aggiornato ===
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     return FAISS.from_documents(chunks, embeddings)
 
 # --- STREAMLIT APP ---
@@ -296,12 +298,26 @@ if user_code:
     user_question = st.text_input("✍️ Fai la tua domanda:")
     if user_question:
         with st.spinner("Sto cercando nei materiali remoti..."):
+            # Vectorstore
             vectorstore = create_vectorstore_from_ftp(materia_scelta)
+
+            # === Retriever limitato per prompt più corto ===
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+
+            # === LLM modello aggiornato ===
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
             qa = RetrievalQA.from_chain_type(
-                llm=ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0),
+                llm=llm,
                 chain_type="stuff",
-                retriever=vectorstore.as_retriever()
+                retriever=retriever
             )
-            response = qa.run(user_question)
+
+            try:
+                response = qa.run(user_question)
+            except Exception as e:
+                st.error(f"Errore del modello (controlla modello/API key/segreti): {e}")
+                st.stop()
+
             increment_quota(user_code)
             st.success(response)
