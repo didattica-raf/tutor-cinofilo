@@ -1,138 +1,197 @@
-# app.py
-import streamlit as st
+
 import os
-import json
-from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
+import streamlit as st
 
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.chains import RetrievalQA
-from langchain.chat_models import ChatOpenAI
-
-# --- CONFIG ---
+# ---- CONFIG ----
 DOCS_ROOT = "docs"
-USERS_FILE = "users.json"
-VALID_CODES = ["2", "3", "5", "8", "13", "21", "34", "55", "89", "144"]
-MAX_QUESTIONS_PER_DAY = 5
+Path(DOCS_ROOT).mkdir(parents=True, exist_ok=True)
 
-# --- FUNZIONI DI SUPPORTO ---
-def local_css(file_name):
-    if not os.path.exists(file_name):
-        return
-    with open(file_name) as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+# ---- SECRETS/ENV HELPER ----
+def _get_secret(key: str, default: str | None = None):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
 
-def ensure_users_file():
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump({}, f)
+# ---- FTP SYNC (FTPS with fallback to FTP) ----
+def sync_from_ftp():
+    """
+    Sync recursively from FTP/FTPS into DOCS_ROOT.
+    Supported files: .pdf, .docx, .txt, .md
+    """
+    host = _get_secret("FTP_HOST")
+    port = int(_get_secret("FTP_PORT", "21"))
+    user = _get_secret("FTP_USER")
+    password = _get_secret("FTP_PASS")
+    remote_dir = _get_secret("FTP_DIR", "/")
 
-def load_users():
-    ensure_users_file()
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if not all([host, user, password]):
+        raise RuntimeError("Missing FTP config: FTP_HOST / FTP_USER / FTP_PASS.")
 
-def save_users(users):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, indent=2)
+    exts = {".pdf", ".docx", ".txt", ".md"}
 
-def check_quota(user_code):
-    users = load_users()
-    today = datetime.today().strftime("%Y-%m-%d")
-    if user_code not in users:
-        users[user_code] = {"count": 0, "last_access": today}
-    elif users[user_code]["last_access"] != today:
-        users[user_code]["count"] = 0
-        users[user_code]["last_access"] = today
-    save_users(users)
-    return users[user_code]["count"]
+    def should_get(name: str) -> bool:
+        return Path(name).suffix.lower() in exts
 
-def increment_quota(user_code):
-    users = load_users()
-    users[user_code]["count"] += 1
-    save_users(users)
-
-def load_documents_from_folder(folder_path):
-    docs = []
-    folder = Path(folder_path)
-    if not folder.exists():
-        return docs
-    for pdf_path in folder.rglob("*.pdf"):
+    # Walk helper
+    def ftp_walk(ftp, root):
+        entries = []
         try:
-            loader = PyPDFLoader(str(pdf_path))
-            docs.extend(loader.load_and_split())
+            ftp.retrlines(f"MLSD {root}", entries.append)
+            parsed = []
+            for e in entries:
+                facts, _, fname = e.partition(" ")
+                factmap = dict(f.split("=", 1) for f in facts.rstrip(";").split(";") if "=" in f)
+                parsed.append((fname, factmap.get("type", "file")))
+        except Exception:
+            lines = []
+            ftp.retrlines(f"LIST {root}", lines.append)
+            parsed = []
+            for line in lines:
+                parts = line.split(maxsplit=8)
+                kind = "dir" if parts and parts[0].startswith("d") else "file"
+                fname = parts[-1] if parts else ""
+                if fname:
+                    parsed.append((fname, kind))
+
+        files, dirs = [], []
+        for fname, kind in parsed:
+            if fname in (".", ".."):
+                continue
+            if kind.lower() == "dir":
+                dirs.append(fname)
+            else:
+                files.append(fname)
+
+        yield (root, files)
+        for d in dirs:
+            sub = root.rstrip("/") + "/" + d
+            yield from ftp_walk(ftp, sub)
+
+    # Connect: try FTPS first
+    def connect_ftps_then_ftp():
+        try:
+            from ftplib import FTP_TLS
+            ftps = FTP_TLS()
+            ftps.connect(host, port, timeout=30)
+            ftps.login(user=user, passwd=password)
+            try:
+                ftps.prot_p()
+            except Exception:
+                pass
+            return ftps
+        except Exception:
+            from ftplib import FTP
+            ftp = FTP()
+            ftp.connect(host, port, timeout=30)
+            ftp.login(user=user, passwd=password)
+            return ftp
+
+    ftp = connect_ftps_then_ftp()
+
+    # Ensure starting dir
+    try:
+        ftp.cwd(remote_dir)
+        start_dir = remote_dir
+    except Exception:
+        start_dir = "/"
+
+    count = 0
+    for dirpath, files in ftp_walk(ftp, start_dir):
+        rel = dirpath[len(start_dir):].lstrip("/") if dirpath.startswith(start_dir) else dirpath.strip("/")
+        local_dir = Path(DOCS_ROOT) / rel if rel else Path(DOCS_ROOT)
+        local_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in files:
+            if not should_get(name):
+                continue
+            remote_path = dirpath.rstrip("/") + "/" + name
+            local_path = local_dir / name
+            with open(local_path, "wb") as f:
+                ftp.retrbinary(f"RETR " + remote_path, f.write)
+            count += 1
+
+    try:
+        ftp.quit()
+    except Exception:
+        pass
+
+    if count == 0:
+        raise RuntimeError("FTP sync finished but no eligible files were downloaded.")
+    return count
+
+# ---- RAG PIPELINE (minimal) ----
+@st.cache_resource(show_spinner=False)
+def build_vectorstore():
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain.text_splitter import CharacterTextSplitter
+    from langchain_community.embeddings import OpenAIEmbeddings
+    from langchain_community.vectorstores import FAISS
+
+    docs = []
+    # Load PDFs (extend to other types if needed)
+    for p in Path(DOCS_ROOT).rglob("*.pdf"):
+        try:
+            docs.extend(PyPDFLoader(str(p)).load())
         except Exception as e:
-            st.warning(f"Impossibile leggere {pdf_path.name}: {e}")
-    return docs
+            st.warning(f"Errore nel leggere {p.name}: {e}")
 
-@st.cache_resource
-def create_vectorstore(materiale="Tutte le materie"):
-    folder = DOCS_ROOT if materiale == "Tutte le materie" else os.path.join(DOCS_ROOT, materiale)
-    docs = load_documents_from_folder(folder)
     if not docs:
-        st.error("⚠️ Nessun documento trovato nella materia selezionata.")
-        st.stop()
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        raise RuntimeError("Nessun documento caricato in docs/.")
+
+    splitter = CharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
     chunks = splitter.split_documents(docs)
-    if not chunks:
-        st.error("⚠️ Nessun contenuto testuale utile trovato nei documenti.")
+
+    # Embeddings (needs OPENAI_API_KEY)
+    api_key = _get_secret("OPENAI_API_KEY")
+    if not api_key:
         st.stop()
+    os.environ["OPENAI_API_KEY"] = api_key
+
     embeddings = OpenAIEmbeddings()
-    return FAISS.from_documents(chunks, embeddings)
 
-# --- STREAMLIT APP ---
-load_dotenv()
-local_css("style.css")
+    vs = FAISS.from_documents(chunks, embeddings)
+    return vs
 
-st.set_page_config(page_title="Chatbot Materie", page_icon="📚")
-st.markdown("<div class='logo-container'><img src='https://i.postimg.cc/5NqjQ63K/images.jpg'></div>", unsafe_allow_html=True)
-st.title("📚 Chatbot Educativo")
-st.markdown("Interroga i documenti caricati per materia. Max 5 domande al giorno per codice.")
+def main():
+    st.set_page_config(page_title="Tutor Cinofilo – RAG FTP", page_icon="🐶")
+    st.title("Tutor Cinofilo – Documenti da Hosting FTP")
 
-user_code = st.text_input("🔐 Inserisci il tuo codice corsista:")
-if user_code and user_code not in VALID_CODES:
-    st.error("❌ Codice non valido.")
-    st.stop()
+    with st.spinner("Sincronizzo i materiali dal tuo hosting..."):
+        try:
+            n = sync_from_ftp()
+            st.success(f"Sincronizzati {n} file dal tuo hosting.")
+        except Exception as e:
+            st.error(f"Errore di sincronizzazione: {e}")
+            st.stop()
 
-if user_code:
-    count = check_quota(user_code)
-    if count >= MAX_QUESTIONS_PER_DAY:
-        st.warning("⛔ Hai raggiunto il limite giornaliero. Riprova domani.")
-        st.stop()
+    with st.spinner("Creo l'indice dei documenti..."):
+        try:
+            vs = build_vectorstore()
+            st.success("Indice pronto.")
+        except Exception as e:
+            st.error(f"Errore nella creazione dell'indice: {e}")
+            st.stop()
 
-    # --- Selezione materia (fix 1 applicato) ---
-    if not Path(DOCS_ROOT).exists():
-        st.error("⚠️ La cartella 'docs' non esiste. Creala e aggiungi dei PDF.")
-        st.stop()
+    query = st.text_input("Fai una domanda sui materiali:", "")
+    if query.strip():
+        from langchain.chains import RetrievalQA
+        from langchain_community.chat_models import ChatOpenAI
 
-    materie_raw = sorted([f.name for f in Path(DOCS_ROOT).iterdir() if f.is_dir()])
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        retriever = vs.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+        qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
 
-    label_overrides = {
-        "Educazione cinofila": "📘 Educazione Cinofila",
-        "Istruzione cinofila": "📗 Istruzione Cinofila",
-    }
+        with st.spinner("Sto cercando la risposta..."):
+            out = qa({"query": query})
 
-    # Mostra l'etichetta carina solo se la cartella esiste con quel nome esatto
-    materie = ["Tutte le materie"] + [label_overrides.get(m, m) for m in materie_raw]
-    label_to_folder = {label_overrides.get(m, m): m for m in materie_raw}
+        st.write(out["result"])
+        with st.expander("Fonti"):
+            for d in out.get("source_documents", []):
+                st.write("•", d.metadata.get("source", "sconosciuto"))
 
-    materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
-    materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
-
-    # --- Domanda ---
-    user_question = st.text_input("✍️ Fai la tua domanda:")
-    if user_question:
-        with st.spinner("Sto cercando nei materiali..."):
-            vectorstore = create_vectorstore(materia_folder)
-            qa = RetrievalQA.from_chain_type(
-                llm=ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0),
-                chain_type="stuff",
-                retriever=vectorstore.as_retriever()
-            )
-            response = qa.run(user_question)
-            increment_quota(user_code)
-            st.success(response)
+if __name__ == "__main__":
+    main()
