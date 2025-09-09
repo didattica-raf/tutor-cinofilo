@@ -1,4 +1,4 @@
-
+# app.py
 import streamlit as st
 import os
 import json
@@ -21,15 +21,23 @@ MAX_QUESTIONS_PER_DAY = 5
 
 # --- FUNZIONI DI SUPPORTO ---
 def local_css(file_name):
+    if not os.path.exists(file_name):
+        return
     with open(file_name) as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
+def ensure_users_file():
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+
 def load_users():
-    with open(USERS_FILE, "r") as f:
+    ensure_users_file()
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def save_users(users):
-    with open(USERS_FILE, "w") as f:
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, indent=2)
 
 def check_quota(user_code):
@@ -50,9 +58,15 @@ def increment_quota(user_code):
 
 def load_documents_from_folder(folder_path):
     docs = []
-    for pdf_path in Path(folder_path).rglob("*.pdf"):
-        loader = PyPDFLoader(str(pdf_path))
-        docs.extend(loader.load_and_split())
+    folder = Path(folder_path)
+    if not folder.exists():
+        return docs
+    for pdf_path in folder.rglob("*.pdf"):
+        try:
+            loader = PyPDFLoader(str(pdf_path))
+            docs.extend(loader.load_and_split())
+        except Exception as e:
+            st.warning(f"Impossibile leggere {pdf_path.name}: {e}")
     return docs
 
 @st.cache_resource
@@ -90,20 +104,26 @@ if user_code:
         st.warning("⛔ Hai raggiunto il limite giornaliero. Riprova domani.")
         st.stop()
 
-    # Selezione materia
+    # --- Selezione materia (fix 1 applicato) ---
+    if not Path(DOCS_ROOT).exists():
+        st.error("⚠️ La cartella 'docs' non esiste. Creala e aggiungi dei PDF.")
+        st.stop()
 
     materie_raw = sorted([f.name for f in Path(DOCS_ROOT).iterdir() if f.is_dir()])
-    materia_labels = {name: name for name in materie_raw}
-    materia_labels.update({
+
+    label_overrides = {
         "Educazione cinofila": "📘 Educazione Cinofila",
-        "Istruzione cinofila": "📗 Istruzione Cinofila"
-    })
-    materie = ["Tutte le materie"] + [materia_labels[m] for m in materia_labels]
+        "Istruzione cinofila": "📗 Istruzione Cinofila",
+    }
+
+    # Mostra l'etichetta carina solo se la cartella esiste con quel nome esatto
+    materie = ["Tutte le materie"] + [label_overrides.get(m, m) for m in materie_raw]
+    label_to_folder = {label_overrides.get(m, m): m for m in materie_raw}
 
     materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
-    label_to_folder = {v: k for k, v in materia_labels.items()}
     materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
 
+    # --- Domanda ---
     user_question = st.text_input("✍️ Fai la tua domanda:")
     if user_question:
         with st.spinner("Sto cercando nei materiali..."):
