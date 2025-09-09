@@ -1,4 +1,3 @@
-
 import streamlit as st
 import os
 import json
@@ -90,6 +89,7 @@ if user_code:
         st.warning("⛔ Hai raggiunto il limite giornaliero. Riprova domani.")
         st.stop()
 
+    # Selezione materia
     materie_raw = sorted([f.name for f in Path(DOCS_ROOT).iterdir() if f.is_dir()])
     materia_labels = {name: name for name in materie_raw}
     materia_labels.update({
@@ -97,15 +97,17 @@ if user_code:
         "Istruzione cinofila": "📗 Istruzione Cinofila"
     })
     materie = ["Tutte le materie"] + [materia_labels[m] for m in materia_labels]
-
-    materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
     label_to_folder = {v: k for k, v in materia_labels.items()}
+    materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
     materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
 
-    # Campo input collegato a session_state
-    user_question = st.text_input("✍️ Fai la tua domanda:", key="user_question")
+    # Inizializza session state per input
+    if "user_question" not in st.session_state:
+        st.session_state.user_question = ""
 
-    if st.session_state.user_question:
+    user_input = st.text_input("✍️ Fai la tua domanda:", value=st.session_state.user_question)
+
+    if user_input:
         with st.spinner("Sto cercando nei materiali..."):
             vectorstore = create_vectorstore(materia_folder)
             qa = RetrievalQA.from_chain_type(
@@ -113,8 +115,9 @@ if user_code:
                 chain_type="stuff",
                 retriever=vectorstore.as_retriever()
             )
-            response = qa.run(st.session_state.user_question)
+            response = qa.run(user_input)
             increment_quota(user_code)
             st.success(response)
-            # Svuota il campo input
             st.session_state.user_question = ""
+    else:
+        st.session_state.user_question = user_input
