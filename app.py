@@ -11,7 +11,7 @@ from langchain.schema import Document
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
+from langchain.chains.combine_documents import load_qa_chain
 from langchain_community.chat_models import ChatOpenAI
 
 # --- CONFIG ---
@@ -389,18 +389,16 @@ if user_code:
             docs = retriever.get_relevant_documents(user_question)
             docs = _truncate_docs(docs, max_chars=30000)
 
-            # LLM e catena map_reduce per non sforare il contesto per request
-            llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
-            qa = RetrievalQA.from_chain_type(
-                llm=llm,
-                retriever=None,
-                chain_type="map_reduce",
-                return_source_documents=True
-            )
+            # LLM corretto (usa 'model', non 'model_name')
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-            out = qa({"query": user_question, "input_documents": docs})
+            # Catena documentale che lavora a blocchi (evita overflow contesto)
+            chain = load_qa_chain(llm, chain_type="map_reduce")  # output in 'output_text'
+
+            out = chain({"input_documents": docs, "question": user_question})
             increment_quota(user_code)
-            st.success(out["result"])
+            st.success(out["output_text"])
+
             with st.expander("Fonti"):
-                for d in out.get("source_documents", []):
+                for d in docs:
                     st.write("•", d.metadata.get("source", "sconosciuto"))
