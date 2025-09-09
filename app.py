@@ -125,17 +125,17 @@ def local_css(file_name):
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 def ensure_users_file():
-    if not os.path.exists("users.json"):
-        with open("users.json", "w", encoding="utf-8") as f:
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
             json.dump({}, f)
 
 def load_users():
     ensure_users_file()
-    with open("users.json", "r", encoding="utf-8") as f:
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def save_users(users):
-    with open("users.json", "w", encoding="utf-8") as f:
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, indent=2)
 
 def check_quota(user_code):
@@ -154,6 +154,25 @@ def increment_quota(user_code):
     users[user_code]["count"] += 1
     save_users(users)
 
+# --- Tokenizer per truncation a livello token ---
+def _get_tokenizer():
+    try:
+        import tiktoken
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+def _truncate_text_tokens(text: str, max_tokens: int = 800) -> str:
+    enc = _get_tokenizer()
+    if not enc:
+        # fallback: approx con caratteri
+        return text[: max_tokens * 4]
+    tokens = enc.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    tokens = tokens[:max_tokens]
+    return enc.decode(tokens)
+
 # --- COSTRUZIONE DOCUMENTI (da FTP, in RAM) ---
 def _build_documents_from_ftp(materia: str | None):
     """
@@ -169,13 +188,10 @@ def _build_documents_from_ftp(materia: str | None):
 
     targets = []
     if not materia or materia == "Tutte le materie":
-        # tutte le sottocartelle
         for m in remote_materie:
             targets.append(base_dir.rstrip("/") + "/" + m)
-        # anche eventuali PDF direttamente dentro base_dir
-        targets.append(base_dir)
+        targets.append(base_dir)  # PDF direttamente nella root
     else:
-        # solo la sottocartella scelta
         chosen = base_dir.rstrip("/") + "/" + materia
         targets = [chosen]
 
@@ -198,6 +214,8 @@ def _build_documents_from_ftp(materia: str | None):
                 text = "\n".join(text_pages).strip()
                 if not text:
                     continue
+                # taglio di sicurezza per documento
+                text = _truncate_text_tokens(text, 4000)
                 documents.append(
                     Document(
                         page_content=text,
@@ -214,23 +232,37 @@ def _build_documents_from_ftp(materia: str | None):
 
     return documents, remote_materie, base_dir
 
-# --- VECTORSTORE (on-demand, senza salvataggi su disco) ---
-def _clean_chunks(chunks, min_chars=50):
-    """Filtra chunk vuoti/troppo corti, deduplica i testi identici, e limita il numero massimo per l'embedding."""
+# --- VECTORSTORE (on-demand, con mini-batch embedding) ---
+def _clean_chunks(chunks, min_chars=50, max_tokens_per_chunk=800):
+    """Filtra chunk vuoti/troppo corti, deduplica e tronca ogni chunk a max_tokens_per_chunk tokens."""
+    enc = _get_tokenizer()
     seen = set()
     cleaned = []
     for c in chunks:
         txt = (c.page_content or "").strip().replace("\x00", "")
         if len(txt) < min_chars:
             continue
-        if txt in seen:
+        # dedup semplice (prefisso come chiave)
+        key = txt[:2000]
+        if key in seen:
             continue
-        seen.add(txt)
+        seen.add(key)
+        # truncation a livello token
+        if enc:
+            ids = enc.encode(txt)
+            if len(ids) > max_tokens_per_chunk:
+                ids = ids[:max_tokens_per_chunk]
+                txt = enc.decode(ids)
+        else:
+            if len(txt) > max_tokens_per_chunk * 4:
+                txt = txt[: max_tokens_per_chunk * 4]
         c.page_content = txt
         cleaned.append(c)
-    # Cap massimo per evitare payload esagerati (configurabile)
-    MAX_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "2000"))
+
+    # Cap massimo chunk da embeddare
+    MAX_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "500"))
     if len(cleaned) > MAX_CHUNKS:
+        st.warning(f"Troppi chunk ({len(cleaned)}). Ne indicizzo solo {MAX_CHUNKS}.")
         cleaned = cleaned[:MAX_CHUNKS]
     return cleaned
 
@@ -241,9 +273,9 @@ def create_vectorstore_from_ftp(materia="Tutte le materie"):
         st.stop()
 
     # Chunk più piccoli per ridurre contesto aggregato
-    splitter = CharacterTextSplitter(chunk_size=800, chunk_overlap=120)
+    splitter = CharacterTextSplitter(chunk_size=600, chunk_overlap=80)
     chunks = splitter.split_documents(docs)
-    chunks = _clean_chunks(chunks, min_chars=50)
+    chunks = _clean_chunks(chunks, min_chars=50, max_tokens_per_chunk=800)
     if not chunks:
         st.error("⚠️ Nessun contenuto testuale utile trovato nei documenti (via FTP).")
         st.stop()
@@ -255,21 +287,29 @@ def create_vectorstore_from_ftp(materia="Tutte le materie"):
         st.stop()
     os.environ["OPENAI_API_KEY"] = api_key
 
-    # Usa un modello embeddings esplicito e più economico/stabile
     embeddings = OpenAIEmbeddings(
         model="text-embedding-3-small",
-        # openai_api_key=api_key,  # opzionale: è già letto da env
-        # chunk_size=128           # opzionale: per batch più piccoli
+        chunk_size=16  # batch piccolo per richiesta
     )
 
+    # Mini-batch embedding + build FAISS incrementale
+    index = None
+    step = 100  # processa 100 chunk per volta
     try:
-        return FAISS.from_documents(chunks, embeddings)
+        for i in range(0, len(chunks), step):
+            part = chunks[i:i+step]
+            if index is None:
+                index = FAISS.from_documents(part, embeddings)
+            else:
+                index.add_documents(part, embeddings)
     except Exception as e:
         st.error(f"Errore durante la creazione degli embeddings/indice: {e}")
         st.stop()
 
+    return index
+
 # --- Guard-rail: limite di sicurezza sul contesto aggregato (in caratteri) ---
-def _truncate_docs(docs, max_chars=40000):  # ~8-12k token
+def _truncate_docs(docs, max_chars=30000):  # ~6-9k token
     out, total = [], 0
     for d in docs:
         pc = d.page_content or ""
@@ -337,17 +377,17 @@ if user_code:
     user_question = st.text_input("✍️ Fai la tua domanda:")
     if user_question:
         with st.spinner("Sto cercando nei materiali remoti..."):
-            vectorstore = create_vectorstore_from_ftp(materia_scelta)
+            index = create_vectorstore_from_ftp(materia_scelta)
 
             # retriever sobrio e diversificato
-            retriever = vectorstore.as_retriever(
+            retriever = index.as_retriever(
                 search_type="mmr",
                 search_kwargs={"k": 5, "fetch_k": 25, "lambda_mult": 0.5}
             )
 
             # Recupera i documenti rilevanti e applica un cap duro
             docs = retriever.get_relevant_documents(user_question)
-            docs = _truncate_docs(docs, max_chars=40000)
+            docs = _truncate_docs(docs, max_chars=30000)
 
             # LLM e catena map_reduce per non sforare il contesto per request
             llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
