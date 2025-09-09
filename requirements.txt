@@ -1,7 +1,14 @@
 streamlit>=1.36.0
 python-dotenv>=1.0.1
-langchain-community>=0.2.10
-faiss-cpu>=1.8.0
-openai>=1.40.0
-tiktoken>=0.7.0
 pypdf>=4.3.1
+
+# LangChain + provider ufficiali
+langchain>=0.2.10
+langchain-community>=0.2.10
+langchain-openai>=0.1.7
+
+# FAISS per lo storage vettoriale
+faiss-cpu>=1.8.0
+
+# Tokenizer per limitare i token
+tiktoken>=0.7.0
