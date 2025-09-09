@@ -1,3 +1,4 @@
+
 import streamlit as st
 import os
 import json
@@ -98,16 +99,20 @@ if user_code:
     })
     materie = ["Tutte le materie"] + [materia_labels[m] for m in materia_labels]
     label_to_folder = {v: k for k, v in materia_labels.items()}
+
     materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
     materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
 
-    # Inizializza session state per input
+    # Inizializza lo stato dell'input se non esiste
     if "user_question" not in st.session_state:
         st.session_state.user_question = ""
 
-    user_input = st.text_input("✍️ Fai la tua domanda:", value=st.session_state.user_question)
+    # FORM DOMANDA
+    with st.form("question_form"):
+        st.text_input("✍️ Fai la tua domanda:", key="user_question")
+        submitted = st.form_submit_button("Invia")
 
-    if user_input:
+    if submitted and st.session_state.user_question.strip():
         with st.spinner("Sto cercando nei materiali..."):
             vectorstore = create_vectorstore(materia_folder)
             qa = RetrievalQA.from_chain_type(
@@ -115,9 +120,8 @@ if user_code:
                 chain_type="stuff",
                 retriever=vectorstore.as_retriever()
             )
-            response = qa.run(user_input)
+            response = qa.run(st.session_state.user_question.strip())
             increment_quota(user_code)
             st.success(response)
-            st.session_state.user_question = ""
-    else:
-        st.session_state.user_question = user_input
+
+        st.session_state.user_question = ""  # svuota il campo input dopo l'invio
