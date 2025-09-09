@@ -102,9 +102,7 @@ if user_code:
     materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
     materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
 
-    if "user_question" not in st.session_state:
-        st.session_state.user_question = ""
-
+    st.session_state.setdefault("user_question", "")
     user_question = st.text_input("✍️ Fai la tua domanda:", key="user_question")
     if user_question:
         with st.spinner("Sto cercando nei materiali..."):
@@ -117,4 +115,5 @@ if user_code:
             response = qa.run(user_question)
             increment_quota(user_code)
             st.success(response)
-            st.session_state.user_question = ""
+            st.session_state["user_question"] = ""
+            st.rerun()
