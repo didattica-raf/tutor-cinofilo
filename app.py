@@ -4,22 +4,25 @@ import os
 import io
 import json
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
-from pypdf import PdfReader  # leggere PDF da bytes
+from pypdf import PdfReader  # per leggere PDF da bytes
 from langchain.schema import Document
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
-from langchain.chains.combine_documents import load_qa_chain
-from langchain_community.chat_models import ChatOpenAI
+from langchain.chains import RetrievalQA
 
-# --- CONFIG ---
+# === IMPORT MODERNI PER OPENAI (migrazione consigliata) ===
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+
+# --- CONFIG (immutata dove possibile) ---
+DOCS_ROOT = "docs"  # non più usata per caricare, ma la lascio per compatibilità
 USERS_FILE = "users.json"
 VALID_CODES = ["2", "3", "5", "8", "13", "21", "34", "55", "89", "144"]
 MAX_QUESTIONS_PER_DAY = 5
 
-# === UTIL SECRETS/ENV ===
+# --- UTIL: secrets/env ---
 def _get_secret(key: str, default: str | None = None):
     try:
         if key in st.secrets:
@@ -28,7 +31,7 @@ def _get_secret(key: str, default: str | None = None):
         pass
     return os.getenv(key, default)
 
-# === FTP helpers (lettura in memoria, nessuna scrittura su disco) ===
+# --- FTP helpers (lettura in memoria, niente scritture su disco) ---
 def _ftp_connect():
     """Ritorna una connessione FTP o FTPS (TLS) usando i secrets."""
     from ftplib import FTP, FTP_TLS
@@ -40,7 +43,7 @@ def _ftp_connect():
     if not all([host, user, password]):
         raise RuntimeError("FTP non configurato (FTP_HOST/FTP_USER/FTP_PASS).")
 
-    # Tenta FTPS esplicito, poi fallback a FTP
+    # tenta FTPS esplicito, poi fallback a FTP
     try:
         ftps = FTP_TLS()
         ftps.connect(host, port, timeout=30)
@@ -117,7 +120,7 @@ def _ftp_read_file_bytes(ftp, remote_path):
     buf.seek(0)
     return buf
 
-# --- FUNZIONI DI SUPPORTO (quota & UI) ---
+# --- FUNZIONI DI SUPPORTO (tue) ---
 def local_css(file_name):
     if not os.path.exists(file_name):
         return
@@ -154,25 +157,6 @@ def increment_quota(user_code):
     users[user_code]["count"] += 1
     save_users(users)
 
-# --- Tokenizer per truncation a livello token ---
-def _get_tokenizer():
-    try:
-        import tiktoken
-        return tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        return None
-
-def _truncate_text_tokens(text: str, max_tokens: int = 800) -> str:
-    enc = _get_tokenizer()
-    if not enc:
-        # fallback: approx con caratteri
-        return text[: max_tokens * 4]
-    tokens = enc.encode(text)
-    if len(tokens) <= max_tokens:
-        return text
-    tokens = tokens[:max_tokens]
-    return enc.decode(tokens)
-
 # --- COSTRUZIONE DOCUMENTI (da FTP, in RAM) ---
 def _build_documents_from_ftp(materia: str | None):
     """
@@ -188,10 +172,13 @@ def _build_documents_from_ftp(materia: str | None):
 
     targets = []
     if not materia or materia == "Tutte le materie":
+        # tutte le sottocartelle
         for m in remote_materie:
             targets.append(base_dir.rstrip("/") + "/" + m)
-        targets.append(base_dir)  # PDF direttamente nella root
+        # in più: anche eventuali PDF direttamente dentro base_dir
+        targets.append(base_dir)
     else:
+        # solo la sottocartella scelta (se esiste), fallback a base_dir/materia
         chosen = base_dir.rstrip("/") + "/" + materia
         targets = [chosen]
 
@@ -214,8 +201,6 @@ def _build_documents_from_ftp(materia: str | None):
                 text = "\n".join(text_pages).strip()
                 if not text:
                     continue
-                # taglio di sicurezza per documento
-                text = _truncate_text_tokens(text, 4000)
                 documents.append(
                     Document(
                         page_content=text,
@@ -232,50 +217,14 @@ def _build_documents_from_ftp(materia: str | None):
 
     return documents, remote_materie, base_dir
 
-# --- VECTORSTORE (on-demand, con mini-batch embedding) ---
-def _clean_chunks(chunks, min_chars=50, max_tokens_per_chunk=800):
-    """Filtra chunk vuoti/troppo corti, deduplica e tronca ogni chunk a max_tokens_per_chunk tokens."""
-    enc = _get_tokenizer()
-    seen = set()
-    cleaned = []
-    for c in chunks:
-        txt = (c.page_content or "").strip().replace("\x00", "")
-        if len(txt) < min_chars:
-            continue
-        # dedup semplice (prefisso come chiave)
-        key = txt[:2000]
-        if key in seen:
-            continue
-        seen.add(key)
-        # truncation a livello token
-        if enc:
-            ids = enc.encode(txt)
-            if len(ids) > max_tokens_per_chunk:
-                ids = ids[:max_tokens_per_chunk]
-                txt = enc.decode(ids)
-        else:
-            if len(txt) > max_tokens_per_chunk * 4:
-                txt = txt[: max_tokens_per_chunk * 4]
-        c.page_content = txt
-        cleaned.append(c)
-
-    # Cap massimo chunk da embeddare
-    MAX_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "500"))
-    if len(cleaned) > MAX_CHUNKS:
-        st.warning(f"Troppi chunk ({len(cleaned)}). Ne indicizzo solo {MAX_CHUNKS}.")
-        cleaned = cleaned[:MAX_CHUNKS]
-    return cleaned
-
+# --- VECTORSTORE (on-demand, senza cache disco) ---
 def create_vectorstore_from_ftp(materia="Tutte le materie"):
     docs, _, _ = _build_documents_from_ftp(materia)
     if not docs:
         st.error("⚠️ Nessun documento trovato nella materia selezionata (via FTP).")
         st.stop()
-
-    # Chunk più piccoli per ridurre contesto aggregato
-    splitter = CharacterTextSplitter(chunk_size=600, chunk_overlap=80)
+    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
-    chunks = _clean_chunks(chunks, min_chars=50, max_tokens_per_chunk=800)
     if not chunks:
         st.error("⚠️ Nessun contenuto testuale utile trovato nei documenti (via FTP).")
         st.stop()
@@ -287,39 +236,9 @@ def create_vectorstore_from_ftp(materia="Tutte le materie"):
         st.stop()
     os.environ["OPENAI_API_KEY"] = api_key
 
-    embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        chunk_size=16  # batch piccolo per richiesta
-    )
-
-    # Mini-batch embedding + build FAISS incrementale
-    index = None
-    step = 100  # processa 100 chunk per volta
-    try:
-        for i in range(0, len(chunks), step):
-            part = chunks[i:i+step]
-            if index is None:
-                index = FAISS.from_documents(part, embeddings)
-            else:
-                index.add_documents(part, embeddings)
-    except Exception as e:
-        st.error(f"Errore durante la creazione degli embeddings/indice: {e}")
-        st.stop()
-
-    return index
-
-# --- Guard-rail: limite di sicurezza sul contesto aggregato (in caratteri) ---
-def _truncate_docs(docs, max_chars=30000):  # ~6-9k token
-    out, total = [], 0
-    for d in docs:
-        pc = d.page_content or ""
-        if total + len(pc) > max_chars:
-            d.page_content = pc[: max(0, max_chars - total)]
-            out.append(d)
-            break
-        out.append(d)
-        total += len(pc)
-    return out
+    # === Embeddings modello aggiornato ===
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    return FAISS.from_documents(chunks, embeddings)
 
 # --- STREAMLIT APP ---
 load_dotenv()
@@ -328,7 +247,7 @@ local_css("style.css")
 st.set_page_config(page_title="Chatbot Materie", page_icon="📚")
 st.markdown("<div class='logo-container'><img src='https://i.postimg.cc/5NqjQ63K/images.jpg'></div>", unsafe_allow_html=True)
 st.title("📚 Chatbot Educativo")
-st.markdown("Interroga i documenti <b>remoti via FTP</b> per materia. Max 5 domande al giorno per codice.", unsafe_allow_html=True)
+st.markdown("Interroga i documenti **remoti via FTP** per materia. Max 5 domande al giorno per codice.")
 
 # Diagnostica rapida
 with st.expander("Diagnostica"):
@@ -360,8 +279,10 @@ if user_code:
         st.error(f"Errore FTP: {e}")
         st.stop()
 
-    # UI materie
+    # UI materie (mostriamo “Tutte le materie” + cartelle remote)
     materie = ["Tutte le materie"] + materie_remoto
+
+    # opzionali override etichette, solo cosmetico
     label_overrides = {
         "Educazione cinofila": "📘 Educazione Cinofila",
         "Istruzione cinofila": "📗 Istruzione Cinofila",
@@ -377,28 +298,26 @@ if user_code:
     user_question = st.text_input("✍️ Fai la tua domanda:")
     if user_question:
         with st.spinner("Sto cercando nei materiali remoti..."):
-            index = create_vectorstore_from_ftp(materia_scelta)
+            # Vectorstore
+            vectorstore = create_vectorstore_from_ftp(materia_scelta)
 
-            # retriever sobrio e diversificato
-            retriever = index.as_retriever(
-                search_type="mmr",
-                search_kwargs={"k": 5, "fetch_k": 25, "lambda_mult": 0.5}
-            )
+            # === Retriever limitato per prompt più corto ===
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
-            # Recupera i documenti rilevanti e applica un cap duro
-            docs = retriever.get_relevant_documents(user_question)
-            docs = _truncate_docs(docs, max_chars=30000)
-
-            # LLM corretto (usa 'model', non 'model_name')
+            # === LLM modello aggiornato ===
             llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-            # Catena documentale che lavora a blocchi (evita overflow contesto)
-            chain = load_qa_chain(llm, chain_type="map_reduce")  # output in 'output_text'
+            qa = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=retriever
+            )
 
-            out = chain({"input_documents": docs, "question": user_question})
+            try:
+                response = qa.run(user_question)
+            except Exception as e:
+                st.error(f"Errore del modello (controlla modello/API key/segreti): {e}")
+                st.stop()
+
             increment_quota(user_code)
-            st.success(out["output_text"])
-
-            with st.expander("Fonti"):
-                for d in docs:
-                    st.write("•", d.metadata.get("source", "sconosciuto"))
+            st.success(response)
