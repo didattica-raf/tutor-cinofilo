@@ -1,0 +1,10 @@
+# Usa .env solo in locale. NON committare questo file.
+HOSTING_MODE=ftp
+FTP_HOST=ftp.tutorcinofiloai.it
+FTP_PORT=21
+FTP_USER=16742621@aruba.it
+FTP_PASS=Lara1976!!
+FTP_DIR=/
+
+# OpenAI (necessario per embeddings/LLM)
+OPENAI_API_KEY=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
