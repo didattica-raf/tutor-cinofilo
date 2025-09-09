@@ -1,3 +1,4 @@
+
 import streamlit as st
 import os
 import json
@@ -69,9 +70,6 @@ def create_vectorstore(materiale="Tutte le materie"):
     embeddings = OpenAIEmbeddings()
     return FAISS.from_documents(chunks, embeddings)
 
-def clear_input():
-    st.session_state["user_question"] = ""
-
 # --- STREAMLIT APP ---
 load_dotenv()
 local_css("style.css")
@@ -92,6 +90,8 @@ if user_code:
         st.warning("⛔ Hai raggiunto il limite giornaliero. Riprova domani.")
         st.stop()
 
+    # Selezione materia
+
     materie_raw = sorted([f.name for f in Path(DOCS_ROOT).iterdir() if f.is_dir()])
     materia_labels = {name: name for name in materie_raw}
     materia_labels.update({
@@ -99,17 +99,12 @@ if user_code:
         "Istruzione cinofila": "📗 Istruzione Cinofila"
     })
     materie = ["Tutte le materie"] + [materia_labels[m] for m in materia_labels]
-    label_to_folder = {v: k for k, v in materia_labels.items()}
+
     materia_scelta = st.selectbox("📁 Scegli la materia:", materie)
+    label_to_folder = {v: k for k, v in materia_labels.items()}
     materia_folder = label_to_folder.get(materia_scelta, materia_scelta)
 
-    st.text_input(
-        "✍️ Fai la tua domanda:",
-        key="user_question",
-        on_change=clear_input
-    )
-    user_question = st.session_state.get("user_question", "")
-
+    user_question = st.text_input("✍️ Fai la tua domanda:")
     if user_question:
         with st.spinner("Sto cercando nei materiali..."):
             vectorstore = create_vectorstore(materia_folder)
