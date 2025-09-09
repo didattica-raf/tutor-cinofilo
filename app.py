@@ -215,6 +215,25 @@ def _build_documents_from_ftp(materia: str | None):
     return documents, remote_materie, base_dir
 
 # --- VECTORSTORE (on-demand, senza salvataggi su disco) ---
+def _clean_chunks(chunks, min_chars=50):
+    """Filtra chunk vuoti/troppo corti, deduplica i testi identici, e limita il numero massimo per l'embedding."""
+    seen = set()
+    cleaned = []
+    for c in chunks:
+        txt = (c.page_content or "").strip().replace("\x00", "")
+        if len(txt) < min_chars:
+            continue
+        if txt in seen:
+            continue
+        seen.add(txt)
+        c.page_content = txt
+        cleaned.append(c)
+    # Cap massimo per evitare payload esagerati (configurabile)
+    MAX_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "2000"))
+    if len(cleaned) > MAX_CHUNKS:
+        cleaned = cleaned[:MAX_CHUNKS]
+    return cleaned
+
 def create_vectorstore_from_ftp(materia="Tutte le materie"):
     docs, _, _ = _build_documents_from_ftp(materia)
     if not docs:
@@ -224,6 +243,7 @@ def create_vectorstore_from_ftp(materia="Tutte le materie"):
     # Chunk più piccoli per ridurre contesto aggregato
     splitter = CharacterTextSplitter(chunk_size=800, chunk_overlap=120)
     chunks = splitter.split_documents(docs)
+    chunks = _clean_chunks(chunks, min_chars=50)
     if not chunks:
         st.error("⚠️ Nessun contenuto testuale utile trovato nei documenti (via FTP).")
         st.stop()
@@ -235,8 +255,18 @@ def create_vectorstore_from_ftp(materia="Tutte le materie"):
         st.stop()
     os.environ["OPENAI_API_KEY"] = api_key
 
-    embeddings = OpenAIEmbeddings()
-    return FAISS.from_documents(chunks, embeddings)
+    # Usa un modello embeddings esplicito e più economico/stabile
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        # openai_api_key=api_key,  # opzionale: è già letto da env
+        # chunk_size=128           # opzionale: per batch più piccoli
+    )
+
+    try:
+        return FAISS.from_documents(chunks, embeddings)
+    except Exception as e:
+        st.error(f"Errore durante la creazione degli embeddings/indice: {e}")
+        st.stop()
 
 # --- Guard-rail: limite di sicurezza sul contesto aggregato (in caratteri) ---
 def _truncate_docs(docs, max_chars=40000):  # ~8-12k token
