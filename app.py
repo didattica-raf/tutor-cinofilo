@@ -16,35 +16,65 @@ def _get_secret(key: str, default: str | None = None):
         pass
     return os.getenv(key, default)
 
-# ---- FTP SYNC (diagnostica): prova più root tipiche e mostra info utili ----
+# ---- FTP SYNC (FTPS with fallback to FTP) ----
 def sync_from_ftp():
     """
-    Sincronizza ricorsivamente i file dal tuo hosting FTP/FTPS dentro DOCS_ROOT.
-    - Prova la cartella indicata in FTP_DIR e, se vuota/non valida, scandisce anche
-      root comuni dei provider: /public_html, /www, /web, /htdocs, /
-    - Scarica solo estensioni utili (PDF in primis). Le altre sono opzionali.
-    - Mostra in UI un riepilogo dei percorsi testati e, se necessario, esempi di file ignorati.
+    Sync recursively from FTP/FTPS into DOCS_ROOT.
+    Supported files: .pdf, .docx, .txt, .md
     """
-    from ftplib import FTP, FTP_TLS
-
     host = _get_secret("FTP_HOST")
     port = int(_get_secret("FTP_PORT", "21"))
     user = _get_secret("FTP_USER")
     password = _get_secret("FTP_PASS")
-    ftp_dir = (_get_secret("FTP_DIR", "/") or "/").rstrip("/") or "/"
+    remote_dir = _get_secret("FTP_DIR", "/")
 
     if not all([host, user, password]):
-        raise RuntimeError("Config FTP mancante: FTP_HOST / FTP_USER / FTP_PASS.")
+        raise RuntimeError("Missing FTP config: FTP_HOST / FTP_USER / FTP_PASS.")
 
-    # Estensioni che vale la pena sincronizzare
-    exts = {".pdf", ".docx", ".txt", ".md", ".pptx", ".xlsx", ".csv", ".rtf", ".odt"}
+    exts = {".pdf", ".docx", ".txt", ".md"}
 
     def should_get(name: str) -> bool:
         return Path(name).suffix.lower() in exts
 
-    # Connessione: tenta FTPS (TLS esplicito) e fallback a FTP plain
+    # Walk helper
+    def ftp_walk(ftp, root):
+        entries = []
+        try:
+            ftp.retrlines(f"MLSD {root}", entries.append)
+            parsed = []
+            for e in entries:
+                facts, _, fname = e.partition(" ")
+                factmap = dict(f.split("=", 1) for f in facts.rstrip(";").split(";") if "=" in f)
+                parsed.append((fname, factmap.get("type", "file")))
+        except Exception:
+            lines = []
+            ftp.retrlines(f"LIST {root}", lines.append)
+            parsed = []
+            for line in lines:
+                parts = line.split(maxsplit=8)
+                kind = "dir" if parts and parts[0].startswith("d") else "file"
+                fname = parts[-1] if parts else ""
+                if fname:
+                    parsed.append((fname, kind))
+
+        files, dirs = [], []
+        for fname, kind in parsed:
+            if fname in (".", ".."):
+                continue
+            if kind.lower() == "dir":
+                dirs.append(fname)
+            else:
+                files.append(fname)
+
+        yield (root, files)
+        for d in dirs:
+            sub = root.rstrip("/") + "/" + d
+            yield from ftp_walk(ftp, sub)
+
+    # Connect: try FTPS first
     def connect_ftps_then_ftp():
         try:
+            from ftplib import FTP_TLS
             ftps = FTP_TLS()
             ftps.connect(host, port, timeout=30)
             ftps.login(user=user, passwd=password)
@@ -54,108 +84,44 @@ def sync_from_ftp():
                 pass
             return ftps
         except Exception:
+            from ftplib import FTP
             ftp = FTP()
             ftp.connect(host, port, timeout=30)
             ftp.login(user=user, passwd=password)
             return ftp
 
-    # Listing con MLSD se disponibile, altrimenti LIST
-    def list_dir(ftp, path):
-        items = []
-        try:
-            lines = []
-            ftp.retrlines(f"MLSD {path}", lines.append)
-            for e in lines:
-                facts, _, fname = e.partition(" ")
-                factmap = dict(f.split("=", 1) for f in facts.rstrip(";").split(";") if "=" in f)
-                kind = factmap.get("type", "file")
-                items.append((fname, kind))
-        except Exception:
-            lines = []
-            ftp.retrlines(f"LIST {path}", lines.append)
-            for line in lines:
-                parts = line.split(maxsplit=8)
-                if not parts:
-                    continue
-                kind = "dir" if parts[0].startswith("d") else "file"
-                fname = parts[-1]
-                items.append((fname, kind))
-        return items
-
-    def ftp_walk(ftp, root):
-        yield (root, [f for f, k in list_dir(ftp, root) if k != "dir"])
-        for name, kind in list_dir(ftp, root):
-            if kind == "dir" and name not in (".", ".."):
-                sub = root.rstrip("/") + "/" + name
-                yield from ftp_walk(ftp, sub)
-
     ftp = connect_ftps_then_ftp()
 
-    # 1) Prova la cartella indicata
-    candidate_roots = []
+    # Ensure starting dir
     try:
-        ftp.cwd(ftp_dir)
-        candidate_roots.append(ftp_dir)
+        ftp.cwd(remote_dir)
+        start_dir = remote_dir
     except Exception:
-        pass
+        start_dir = "/"
 
-    # 2) Aggiungi root tipiche dei provider
-    for r in ["/public_html", "/www", "/web", "/htdocs", "/"]:
-        try:
-            ftp.cwd(r)
-            if r not in candidate_roots:
-                candidate_roots.append(r)
-        except Exception:
-            continue
+    count = 0
+    for dirpath, files in ftp_walk(ftp, start_dir):
+        rel = dirpath[len(start_dir):].lstrip("/") if dirpath.startswith(start_dir) else dirpath.strip("/")
+        local_dir = Path(DOCS_ROOT) / rel if rel else Path(DOCS_ROOT)
+        local_dir.mkdir(parents=True, exist_ok=True)
 
-    st.caption(f"[FTP] Percorsi testati: {', '.join(candidate_roots)}")
-
-    total_found = 0
-    total_downloaded = 0
-    ignored_examples = []
-
-    for root in candidate_roots:
-        try:
-            for dirpath, files in ftp_walk(ftp, root):
-                # Costruisci path locale relativo
-                if dirpath == "/":
-                    rel = ""
-                elif dirpath.startswith(root):
-                    rel = dirpath[len(root):].lstrip("/")
-                else:
-                    rel = dirpath.strip("/")
-
-                local_dir = Path(DOCS_ROOT) / rel if rel else Path(DOCS_ROOT)
-                local_dir.mkdir(parents=True, exist_ok=True)
-
-                for name in files:
-                    total_found += 1
-                    remote_path = dirpath.rstrip("/") + "/" + name
-                    if should_get(name):
-                        local_path = local_dir / name
-                        with open(local_path, "wb") as f:
-                            ftp.retrbinary(f"RETR " + remote_path, f.write)
-                        total_downloaded += 1
-                    else:
-                        if len(ignored_examples) < 10:
-                            ignored_examples.append(remote_path)
-        except Exception as e:
-            st.warning(f"[FTP] Ignorato {root} per errore: {e}")
+        for name in files:
+            if not should_get(name):
+                continue
+            remote_path = dirpath.rstrip("/") + "/" + name
+            local_path = local_dir / name
+            with open(local_path, "wb") as f:
+                ftp.retrbinary(f"RETR " + remote_path, f.write)
+            count += 1
 
     try:
         ftp.quit()
     except Exception:
         pass
 
-    if total_downloaded == 0:
-        if ignored_examples:
-            st.info("Esempi di file ignorati (estensioni non incluse):\n- " + "\n- ".join(ignored_examples))
-        raise RuntimeError(
-            f"Nessun file scaricato. Trovati {total_found} elementi totali. "
-            "Controlla che i PDF siano in /public_html (o imposta correttamente FTP_DIR)."
-        )
-
-    return total_downloaded
+    if count == 0:
+        raise RuntimeError("FTP sync finished but no eligible files were downloaded.")
+    return count
 
 # ---- RAG PIPELINE (minimal) ----
 @st.cache_resource(show_spinner=False)
@@ -166,7 +132,7 @@ def build_vectorstore():
     from langchain_community.vectorstores import FAISS
 
     docs = []
-    # Carichiamo SOLO PDF per l'indicizzazione (estendi se ti serve)
+    # Load PDFs (extend to other types if needed)
     for p in Path(DOCS_ROOT).rglob("*.pdf"):
         try:
             docs.extend(PyPDFLoader(str(p)).load())
@@ -174,31 +140,25 @@ def build_vectorstore():
             st.warning(f"Errore nel leggere {p.name}: {e}")
 
     if not docs:
-        raise RuntimeError("Nessun documento PDF trovato in docs/.")
+        raise RuntimeError("Nessun documento caricato in docs/.")
 
     splitter = CharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
     chunks = splitter.split_documents(docs)
 
+    # Embeddings (needs OPENAI_API_KEY)
     api_key = _get_secret("OPENAI_API_KEY")
     if not api_key:
-        st.error("OPENAI_API_KEY mancante nei secrets.")
         st.stop()
     os.environ["OPENAI_API_KEY"] = api_key
 
     embeddings = OpenAIEmbeddings()
+
     vs = FAISS.from_documents(chunks, embeddings)
     return vs
 
 def main():
     st.set_page_config(page_title="Tutor Cinofilo – RAG FTP", page_icon="🐶")
     st.title("Tutor Cinofilo – Documenti da Hosting FTP")
-
-    # Pannello diagnostico
-    with st.expander("Diagnostica FTP"):
-        st.write("Host:", _get_secret("FTP_HOST"))
-        st.write("Porta:", _get_secret("FTP_PORT", "21"))
-        st.write("User:", _get_secret("FTP_USER"))
-        st.write("Dir preferita (FTP_DIR):", _get_secret("FTP_DIR", "/"))
 
     with st.spinner("Sincronizzo i materiali dal tuo hosting..."):
         try:
@@ -208,7 +168,7 @@ def main():
             st.error(f"Errore di sincronizzazione: {e}")
             st.stop()
 
-    with st.spinner("Creo l'indice dei documenti (PDF)..."):
+    with st.spinner("Creo l'indice dei documenti..."):
         try:
             vs = build_vectorstore()
             st.success("Indice pronto.")
