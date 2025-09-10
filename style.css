@@ -1,4 +1,4 @@
-
+/* Vecchio CSS
 .logo-container {
     display: flex;
     justify-content: center;
@@ -6,4 +6,93 @@
 }
 img {
     max-height: 100px;
+}
+*/
+
+/* === Stile personalizzato per l'app Streamlit Chatbot Educativo === */
+
+/* Contenitore del logo */
+.logo-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 30px;
+    padding: 15px;
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* Immagine del logo */
+.logo-container img {
+    max-height: 80px;
+}
+
+/* Titoli */
+h1, h2, h3 {
+    color: #2c3e50;
+    font-weight: 600;
+}
+
+/* Miglioramento testo */
+.stMarkdown, .stTextInput, .stButton button {
+    font-size: 1rem;
+}
+
+/* Selectbox più elegante */
+[data-baseweb="select"] {
+    border-radius: 12px !important;
+    border: 1px solid #d0d0d0 !important;
+    padding: 4px;
+}
+
+/* Stile per i messaggi della chat */
+[data-testid="stChatMessage"][data-testid*="user"] {
+    background-color: #e0f7fa;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin: 6px 0;
+}
+
+[data-testid="stChatMessage"][data-testid*="assistant"] {
+    background-color: #f9f9f9;
+    border-left: 4px solid #4CAF50;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin: 6px 0;
+}
+
+/* Bottone più gradevole */
+.stButton button {
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 0.6em 1.2em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.stButton button:hover {
+    background-color: #45a049;
+}
+
+/* Spaziatura generale */
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+    max-width: 900px;
+    margin: auto;
+}
+
+/* Box risposta bot */
+.chat-response {
+    background: #ffffff;
+    border-left: 4px solid #4CAF50;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin: 10px 0;
+    font-size: 1rem;
+    line-height: 1.6;
 }
