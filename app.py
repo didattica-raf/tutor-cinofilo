@@ -250,10 +250,10 @@ st.title("📚 Chatbot Educativo")
 st.markdown("Interroga i documenti **remoti via FTP** per materia. Max 5 domande al giorno per codice.")
 
 # Diagnostica rapida
-with st.expander("Diagnostica"):
-    st.write("FTP_HOST:", _get_secret("FTP_HOST", "(non impostato)"))
-    st.write("FTP_DIR:", _get_secret("FTP_DIR", "/"))
-    st.write("OPENAI_API_KEY presente:", bool(_get_secret("OPENAI_API_KEY")))
+#with st.expander("Diagnostica"):
+#    st.write("FTP_HOST:", _get_secret("FTP_HOST", "(non impostato)"))
+#    st.write("FTP_DIR:", _get_secret("FTP_DIR", "/"))
+#    st.write("OPENAI_API_KEY presente:", bool(_get_secret("OPENAI_API_KEY")))
 
 # Login semplice con codice
 user_code = st.text_input("🔐 Inserisci il tuo codice corsista:")
