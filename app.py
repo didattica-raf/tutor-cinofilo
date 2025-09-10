@@ -245,8 +245,13 @@ load_dotenv()
 local_css("style.css")
 
 st.set_page_config(page_title="Chatbot Materie", page_icon="📚")
-st.markdown("<div class='logo-container'><img src='https://i.postimg.cc/5NqjQ63K/images.jpg'></div>", unsafe_allow_html=True)
-st.title("📚 Chatbot Educativo")
+#st.markdown("<div class='logo-container'><img src='https://i.postimg.cc/5NqjQ63K/images.jpg'></div>", unsafe_allow_html=True)
+#st.title("📚 Chatbot Educativo")
+col1, col2 = st.columns([1, 4])
+with col1:
+    st.image("https://i.postimg.cc/5NqjQ63K/images.jpg", use_container_width=True)
+with col2:
+    st.markdown("<h1 style='margin-top: 15px;'>📚 Chatbot Educativo</h1>", unsafe_allow_html=True)
 st.markdown("Interroga i documenti **remoti via FTP** per materia. Max 5 domande al giorno per codice.")
 
 # Diagnostica rapida
