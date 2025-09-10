@@ -289,14 +289,12 @@ if user_code:
     display_to_real = {label_overrides.get(m, m): m for m in materie_remoto}
     
     if pretty_labels:
-        st.markdown("<div class='fade-in-1'>", unsafe_allow_html=True)
         materia_scelta_display = st.selectbox(
             "📁 Scegli la materia:",
             pretty_labels,
             index=None,
             placeholder="Seleziona una materia..."
         )
-        st.markdown("</div>", unsafe_allow_html=True)
     
         if materia_scelta_display:
             materia_scelta = display_to_real[materia_scelta_display]
@@ -306,11 +304,8 @@ if user_code:
         st.error("Nessuna materia trovata nella cartella Docs.")
         st.stop()
     
-    # Domanda (con fade-in ritardato)
-    st.markdown("<div class='fade-in-2'>", unsafe_allow_html=True)
+    # Domanda
     user_question = st.text_input("✍️ Fai la tua domanda:")
-    st.markdown("</div>", unsafe_allow_html=True)
-    
     if user_question:
         with st.spinner("Sto cercando nei materiali remoti..."):
             # Vectorstore
