@@ -279,20 +279,21 @@ if user_code:
         st.error(f"Errore FTP: {e}")
         st.stop()
 
-    # UI materie (mostriamo “Tutte le materie” + cartelle remote)
-    materie = ["Tutte le materie"] + materie_remoto
-
-    # opzionali override etichette, solo cosmetico
+    # UI materie (SOLO le sottocartelle di Docs, niente "Tutte le materie")
     label_overrides = {
         "Educazione cinofila": "📘 Educazione Cinofila",
         "Istruzione cinofila": "📗 Istruzione Cinofila",
     }
-    pretty_labels = ["Tutte le materie"] + [label_overrides.get(m, m) for m in materie_remoto]
-    display_to_real = {"Tutte le materie": "Tutte le materie"}
-    display_to_real.update({label_overrides.get(m, m): m for m in materie_remoto})
-
-    materia_scelta_display = st.selectbox("📁 Scegli la materia:", pretty_labels)
-    materia_scelta = display_to_real[materia_scelta_display]
+    
+    pretty_labels = [label_overrides.get(m, m) for m in materie_remoto]
+    display_to_real = {label_overrides.get(m, m): m for m in materie_remoto}
+    
+    if pretty_labels:
+        materia_scelta_display = st.selectbox("📁 Scegli la materia:", pretty_labels)
+        materia_scelta = display_to_real[materia_scelta_display]
+    else:
+        st.error("Nessuna materia trovata nella cartella Docs.")
+        st.stop()
 
     # Domanda
     user_question = st.text_input("✍️ Fai la tua domanda:")
